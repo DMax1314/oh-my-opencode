@@ -50,6 +50,14 @@ Every control/read tool targets a child by id or by name:
 
 Parent-initiated cancel returns its result synchronously in the tool response and never fires a completion notification.
 
+## Idle parking and message revival
+
+`task.resident_idle_timeout_ms` controls how long an eligible terminal child stays resident without activity. It defaults to **900000 ms (15 minutes)** and accepts positive safe-integer milliseconds only; `0`, fractions, strings, and disable sentinels are invalid. The idle sweep uses the same interval and does not keep the host process alive. Parking occurs on a sweep at or after `updated_at + resident_idle_timeout_ms`, never before it. A send refreshes `updated_at`; running children and children with pending steering are protected.
+
+Idle in-process children park as `persisted_only`; process children, including team members, park as `rpc_detached`. Their live handle is released, not irreversibly evicted. A direct `task_send` to an eligible parked child's task id restores its recorded transcript and launch contract, admits one new run epoch, and reports revival only after delivery acknowledgment. Admission refusal and uncertain delivery are explicit errors; uncertain messages are not automatically replayed. Killed, cancelled, lost, and one-shot children remain non-continuable. Capacity-driven eviction is unchanged.
+
+Parking is independent of `task.ttl_ms` (record and artifact retention, default 86400000 ms) and `task.resume_children` (session-shutdown behavior). Old output remains readable through `task_output` until record expiration. Team-name sends remain durable mailbox writes: a parked process has no active inbox poller, so use its task id for direct revival or resume the owning session before expecting mailbox delivery.
+
 ## Inspecting children
 
 - Use **`/tasks`** to list child tasks for the current session or a wider scope.
@@ -96,6 +104,7 @@ All defaults live in `omo.json` under `task` and `teams`. A minimal project conf
   "task": {
     "default_execution_mode": "in-process",
     "reattach_on_reconcile": true,
+    "resident_idle_timeout_ms": 900000,
     "wait": { "default_ms": 90000 }
   }
 }
