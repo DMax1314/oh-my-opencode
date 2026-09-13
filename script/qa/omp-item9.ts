@@ -6,6 +6,7 @@ import { realColdRevive } from "../../packages/senpi-task/src/lifecycle/__fixtur
 import { coldReviveHarness } from "../../packages/senpi-task/src/lifecycle/__fixtures__/cold-revive-harness"
 import { cleanupProjects } from "../../packages/senpi-task/src/manager/__fixtures__/manager-fakes"
 import { idleReplacementCycles } from "../../packages/senpi-task/src/lifecycle/__fixtures__/idle-replacement-cycles"
+import { acknowledgedResidentContinuation, generationAcrossContinuations } from "../../packages/senpi-task/src/lifecycle/__fixtures__/resident-continuation"
 import { OmoTaskSettingsSchema, OmoTaskSettingsLayerSchema } from "@oh-my-opencode/omo-config-core"
 
 const args = process.argv.slice(2)
@@ -134,6 +135,8 @@ async function refusals() {
     assert.equal(ackFailure.fake.followUpCalls.length, 1)
     results.push({ case: "acknowledged batch with failed bookkeeping", initial, repeated, attempts: ackFailure.fake.followUpCalls.length })
   } finally { acknowledged = false; await ackFailure.dispose() }
+  for (const status of ["completed", "interrupted", "error"] as const) results.push(await acknowledgedResidentContinuation(status))
+  for (const generation of [undefined, 1]) results.push(await generationAcrossContinuations(generation))
   results.push(await realColdRevive("in-process", true))
   return results
 }

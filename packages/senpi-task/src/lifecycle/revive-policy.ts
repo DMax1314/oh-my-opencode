@@ -20,13 +20,19 @@ export function checkReviveGeneration(record: TaskRecord, port: RevivePolicyPort
   const current = port?.currentGeneration()
   const recorded = record.config_generation
   if (port === undefined || recorded === undefined || current === undefined || current === recorded) return true
-  switch (port.policy ?? ACTIVE_REVIVE_DRIFT_POLICY) {
+  const policy = port.policy ?? ACTIVE_REVIVE_DRIFT_POLICY
+  switch (policy) {
     case "recorded_warn":
       port.warn({ code: "config_generation_mismatch", task_id: record.task_id, parent_session_id: record.parent_session_id, recorded_generation: recorded, current_generation: current })
       return true
     case "recorded_silent": return true
     case "refuse": return false
+    default: return assertNever(policy)
   }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unexpected revive drift policy: ${JSON.stringify(value)}`)
 }
 
 export function isColdRevivalCandidate(record: TaskRecord): boolean {

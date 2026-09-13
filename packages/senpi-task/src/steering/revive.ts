@@ -3,7 +3,7 @@ import { log } from "@oh-my-opencode/utils"
 import type { ManagedChildHandle } from "../manager/child-handle"
 import { getLifecycleDetachedRevival, getLifecycleDetachedRevivalRollback } from "../lifecycle/port"
 import type { TaskRecord } from "../state"
-import { buildRevived, deliveryUncertain, lazyRevivalFailure, messageSha256 } from "./engine-policy"
+import { buildRevived, deliveryUncertain, lazyRevivalFailure, messageSha256, uncertainDeliveryDenial } from "./engine-policy"
 import type { ReviveReservation, SendOutcome, SteeringPort } from "./types"
 
 export async function reviveTerminal(
@@ -88,22 +88,22 @@ async function deliverRevivedTerminal(
       reservation.release()
       return lazyRevivalFailure(record, "task ownership or status changed before delivery")
     }
-    revived = buildDeliveryRecord(fresh, nowIso(), message)
-    if (rollbackOnFailure) {
-      // Mutate the claimed generation atomically. replace() is a spawn-time stamping surface in
-      // the adapter and would migrate a legacy unknown config generation to today's value.
-      let applied = false
-      const updated = port.store.mutate(record.task_id, (current) => {
-        if (current.status !== fresh.status || current.host_pid !== fresh.host_pid || current.residency_state !== "resident" || current.killed === true || current.notification.run_epoch !== fresh.notification.run_epoch) return current
-        applied = true
-        return buildDeliveryRecord(current, nowIso(), message)
-      })
-      if (!applied || updated === null) {
-        reservation.release()
-        return lazyRevivalFailure(record, "claim changed before delivery")
-      }
-      revived = updated
-    } else port.store.replace(revived)
+    // Both warm and cold continuation fence the same record. A newly observed uncertainty
+    // marker wins before an epoch is admitted; continuation never uses spawn-time stamping.
+    let applied = false
+    let uncertain: SendOutcome | undefined
+    const updated = port.store.mutate(record.task_id, (current) => {
+      if (current.status !== fresh.status || current.host_pid !== fresh.host_pid || current.residency_state !== "resident" || current.killed === true || current.notification.run_epoch !== fresh.notification.run_epoch) return current
+      uncertain = uncertainDeliveryDenial(current, message)
+      if (uncertain !== undefined) return current
+      applied = true
+      return buildDeliveryRecord(current, nowIso(), message)
+    })
+    if (uncertain !== undefined || !applied || updated === null) {
+      reservation.release()
+      return uncertain ?? lazyRevivalFailure(record, "claim changed before delivery")
+    }
+    revived = updated
     port.store.appendEvent(record.task_id, { type: "revived", payload: { run_epoch: revived.notification.run_epoch } })
     const pending = revived.pending_steering ?? []
     await handle.followUp([...pending.map((entry) => entry.message), message].join("\n\n"))
@@ -125,7 +125,7 @@ async function deliverRevivedTerminal(
   } catch (error) {
     if (deliveryAcknowledged && revived?.revive_delivery_uncertain !== undefined) {
       // The batch was accepted. Its pre-dispatch marker survives failed ack bookkeeping, so
-      // neither rollback nor a later cold send can replay the still-persisted queue.
+      // neither rollback nor a later send can replay the still-persisted queue.
       log("senpi-task pending delivery acknowledgment persistence failed", { taskId: record.task_id, error: error instanceof Error ? error.message : String(error) })
       reservation.commit()
       return deliveryUncertain(record, revived.notification.run_epoch)
@@ -178,7 +178,7 @@ async function deliverRevivedTerminal(
 
 function buildDeliveryRecord(record: TaskRecord, timestamp: string, message: string): TaskRecord {
   const revived = buildRevived(record, timestamp)
-  return (record.pending_steering?.length ?? 0) === 0 ? revived : {
+  return record.revive_delivery_uncertain !== undefined || (record.pending_steering?.length ?? 0) === 0 ? revived : {
     ...revived,
     revive_delivery_uncertain: { run_epoch: revived.notification.run_epoch, message_sha256: messageSha256(message) },
   }
