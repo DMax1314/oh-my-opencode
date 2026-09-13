@@ -16,6 +16,7 @@
     "pi"
   ],
   "pi": {
+    "system": true,
     "extensions": [
       "./extensions/omo.js"
     ],
