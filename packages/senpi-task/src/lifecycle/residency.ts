@@ -5,6 +5,7 @@ import { acquireSessionAdmissionLease, type AdmissionLeaseTiming } from "./admis
 import { nowIso, TERMINAL_STATUSES, type LifecycleContext } from "./context"
 import { destroyResidentTask } from "./destroy"
 import { AgentLimitReached } from "./errors"
+import { suspendHandle } from "./shutdown"
 import type { AdmissionResult } from "./types"
 
 // Completed in-process sessions are large, so reclaim them after 15 minutes without activity.
@@ -66,30 +67,39 @@ export async function reclaimIdleResidents(context: LifecycleContext): Promise<r
       Date.parse(record.updated_at) <= cutoff &&
       !context.registry.hasPendingSends(record.task_id),
   )
-  const evicted: string[] = []
+  const reclaimed: string[] = []
   for (const candidate of candidates) {
-    // Re-read immediately before teardown: a concurrent revive changes status/residency and must
-    // win over an idle observation. The destruction port remains the only disposer.
-    const fresh = context.store.load(candidate.task_id)
-    if (
-      fresh === null ||
-      fresh.residency_state !== "resident" ||
-      (fresh.host_pid !== context.hostPid && context.registry.get(fresh.task_id) === undefined) ||
-      !TERMINAL_STATUSES.has(fresh.status) ||
-      Date.parse(fresh.updated_at) > cutoff ||
-      context.registry.hasPendingSends(fresh.task_id)
-    ) continue
+    // Reuse send/teardown arbitration across suspension's asynchronous abort and dispose.
+    if (context.registry.tryClaimEviction?.(candidate.task_id) === false) continue
     try {
-      await destroyResidentTask(context, fresh.task_id, "evict")
-      evicted.push(fresh.task_id)
+      const fresh = context.store.load(candidate.task_id)
+      if (
+        fresh === null ||
+        fresh.residency_state !== "resident" ||
+        (fresh.host_pid !== context.hostPid && context.registry.get(fresh.task_id) === undefined) ||
+        !TERMINAL_STATUSES.has(fresh.status) ||
+        Date.parse(fresh.updated_at) > cutoff ||
+        context.registry.hasPendingSends(fresh.task_id)
+      ) continue
+      if (fresh.killed === true || fresh.status === "cancelled" || fresh.status === "lost") {
+        await destroyResidentTask(context, fresh.task_id, "cancel")
+      } else {
+        const handle = context.registry.get(fresh.task_id)
+        // Reconciliation owns missing handles; a prior failed dispose is not a successful park.
+        if (handle === undefined) continue
+        await suspendHandle(context, handle, "idle")
+      }
+      reclaimed.push(fresh.task_id)
     } catch (error) {
-      log("senpi-task idle resident eviction failed", {
-        taskId: fresh.task_id,
+      log("senpi-task idle resident suspension failed", {
+        taskId: candidate.task_id,
         error: error instanceof Error ? error.message : String(error),
       })
+    } finally {
+      context.registry.releaseEviction?.(candidate.task_id)
     }
   }
-  return evicted
+  return reclaimed
 }
 
 export function startIdleResidentReclaimer(

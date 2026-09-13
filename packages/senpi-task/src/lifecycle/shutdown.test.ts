@@ -375,6 +375,8 @@ describe("suspendOnSessionShutdown", () => {
 
     // then
     expect(store.load("st_000000fb")?.residency_state).toBe("resident")
+    expect(registry.get("st_000000fb")).toBeUndefined()
+    expect(order.filter((step) => step === "dispose:st_000000fb")).toHaveLength(1)
     expect(readEvents(store, "st_000000fb")).toEqual([])
     expect(store.load("st_000000fc")?.residency_state).toBe("persisted_only")
     expect(readEvents(store, "st_000000fc").at(-1)).toBe("suspended")
