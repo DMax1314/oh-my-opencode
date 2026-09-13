@@ -14,6 +14,7 @@ export const defaultIdleReclaimerScheduler = {
 }
 
 export type LifecycleContext = {
+  readonly revivePolicy?: LifecycleDeps["revivePolicy"]
   readonly store: TaskRecordStore
   readonly registry: ResidencyRegistry
   readonly config: OmoTaskSettings
@@ -51,6 +52,7 @@ export const defaultSignaller: ProcessSignaller = {
 export function resolveContext(deps: LifecycleDeps): LifecycleContext {
   return {
     store: deps.store,
+    revivePolicy: deps.revivePolicy,
     registry: deps.registry,
     config: deps.config,
     now: deps.now ?? Date.now,

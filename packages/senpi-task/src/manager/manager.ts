@@ -544,7 +544,8 @@ class TaskManagerImpl implements TaskManager {
     this.#background.delete(taskId)
     this.#released.delete(taskId)
     this.#runStats.delete(taskId)
-    this.#steering.dropPending(taskId)
+    const residency = this.#tryLoad(taskId)?.residency_state
+    if (residency !== "persisted_only" && residency !== "rpc_detached") this.#steering.dropPending(taskId)
   }
 
   getResidentHandle(taskId: string): ManagedChildHandle | undefined { return this.#live.get(taskId)?.handle }

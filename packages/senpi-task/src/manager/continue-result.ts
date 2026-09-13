@@ -13,6 +13,9 @@ export function toContinueResult(outcome: SendOutcome): ContinueResult {
       return { kind: "continued", task_id: outcome.task_id, status: "running", delivered: "revive" }
     case "delivery_uncertain":
       return { kind: "not_continuable", task_id: outcome.task_id, reason: outcome.reason, suggestion: outcome.suggestion }
+    case "admission_refused":
+    case "cwd_unavailable":
+    case "config_generation_mismatch":
     case "capacity_deferred":
       return { kind: "not_continuable", task_id: outcome.task_id, reason: outcome.reason, suggestion: "Retry the send after capacity frees." }
     case "queued":

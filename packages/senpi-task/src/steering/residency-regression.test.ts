@@ -36,7 +36,7 @@ function detachedTerminal(store: ReturnType<typeof createTaskRecordStore>): Task
     status: "completed",
     residency_state: "rpc_detached",
     final_response: "first pass",
-    spawn_spec: { cwd: "/tmp/project" },
+    spawn_spec: { cwd: store.stateDir },
     terminal_at: "2026-09-01T00:00:00.000Z",
   }
   store.save(terminal)
@@ -247,7 +247,7 @@ describe("task_send lazy terminal RPC revival", () => {
 
     const outcome = await manager.sendToTask({ idOrName: record.task_id, message: "retry" })
 
-    expect(outcome.kind).toBe("capacity_deferred")
+    expect(outcome).toMatchObject({ kind: "admission_refused", reason: "lane_capacity" })
     expect(respawns).toBe(0)
     expect(manager.getResidentHandle(record.task_id)).toBeUndefined()
     expect(store.load(record.task_id)?.residency_state).toBe("rpc_detached")
@@ -514,10 +514,11 @@ describe("task_send lazy terminal RPC revival", () => {
     const handle = fakeHandle(record.task_id, followUps)
     const failingStore = {
       ...baseStore,
-      replace: (next: TaskRecord): void => {
+      mutate: (taskId: string, update: (fresh: TaskRecord) => TaskRecord) => baseStore.mutate(taskId, (fresh) => {
+        const next = update(fresh)
         if (next.status === "running") throw new Error("persistence failed")
-        baseStore.replace(next)
-      },
+        return next
+      }),
     }
     const port: SteeringPort = {
       store: failingStore,

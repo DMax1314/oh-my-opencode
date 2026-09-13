@@ -2,6 +2,7 @@ import { log } from "@oh-my-opencode/utils"
 
 import type { ManagedChildHandle } from "../manager/child-handle"
 import { messageability } from "../state"
+import { isColdRevivalCandidate } from "../lifecycle/revive-policy"
 import type { PendingSteeringEntry, TaskRecord } from "../state"
 import {
   DEFAULT_SEND_DELIVERY,
@@ -28,6 +29,7 @@ const NOT_FOUND_SUGGESTION = "Use /tasks to see available tasks, or task_output 
 
 export function createSteeringEngine(port: SteeringPort): SteeringEngine {
   const pendingSends = new Map<string, number>()
+  const coldRevivals = new Set<string>()
 
   // Prelaunch steering is DURABLE: messages sent to a still-pending (queued) child append to the
   // record's pending_steering via store.mutate, so the queue survives a process restart (and a
@@ -69,6 +71,13 @@ export function createSteeringEngine(port: SteeringPort): SteeringEngine {
     if (record.status === "pending") return enqueuePending(record, input.message, deliverAs)
     if (port.isEvicting?.(record.task_id) === true) return evictionRefusal(record.task_id)
 
+    if (coldRevivals.has(record.task_id)) return { kind: "admission_refused", task_id: record.task_id, reason: "revival_in_progress" }
+    if (isColdRevivalCandidate(record)) {
+      if (record.revive_delivery_uncertain !== undefined) return deliveryUncertain(record, record.notification.run_epoch)
+      coldRevivals.add(record.task_id)
+      try { return await reviveDetachedTerminalOnSend(port, record, input.message, nowIso, beginSend, endSend) }
+      finally { coldRevivals.delete(record.task_id) }
+    }
     const mode = messageability(record.status, record.residency_state, record.execution_mode, record.killed)
     if (mode === "not-continuable") {
       return { kind: "not_continuable", task_id: record.task_id, reason: notContinuableReason(record), suggestion: TASK_OUTPUT_SUGGESTION }
