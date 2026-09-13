@@ -6,12 +6,10 @@ import { injectedLifecycleReattachPorts } from "./port"
 import type { IdleReclaimerScheduler, LifecycleDeps, LifecycleReattachPorts, ProcessSignaller, ResidencyRegistry } from "./port"
 import type { BatchAdmissionOptions } from "./residency"
 
-const DEFAULT_ORPHAN_KILL_DELAY_MS = 5_000
+import { defaultIdleReclaimerScheduler } from "./idle-reclaimer-scheduler"
+export { createIdleReclaimerScheduler, defaultIdleReclaimerScheduler } from "./idle-reclaimer-scheduler"
 
-export const defaultIdleReclaimerScheduler = {
-  setInterval: (callback: () => void, delayMs: number): ReturnType<typeof setInterval> => setInterval(callback, delayMs),
-  clearInterval: (timer: ReturnType<typeof setInterval>): void => clearInterval(timer),
-}
+const DEFAULT_ORPHAN_KILL_DELAY_MS = 5_000
 
 export type LifecycleContext = {
   readonly revivePolicy?: LifecycleDeps["revivePolicy"]

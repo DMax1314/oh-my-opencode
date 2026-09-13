@@ -8,13 +8,6 @@ import { AgentLimitReached } from "./errors"
 import { suspendHandle } from "./shutdown"
 import type { AdmissionResult } from "./types"
 
-// Completed in-process sessions are large, so reclaim them after 15 minutes without activity.
-// This is deliberately shorter than the 24-hour record TTL: the record remains available for
-// task_output while the live AgentSession is released. The sweep runs at the same cadence and is
-// unref'd so it cannot keep an otherwise idle host alive.
-export const RESIDENT_IDLE_TIMEOUT_MS = 15 * 60 * 1000
-const RESIDENT_IDLE_SWEEP_INTERVAL_MS = RESIDENT_IDLE_TIMEOUT_MS
-
 // Both the "unlimited" literal and a 0 cap mean unbounded residency (omo.json accepts either).
 function isUnbounded(maxChildren: number | "unlimited"): maxChildren is "unlimited" | 0 {
   return maxChildren === "unlimited" || maxChildren === 0
@@ -58,7 +51,7 @@ function residentsFor(context: LifecycleContext, parentSessionId: string): reado
 
 /** Reclaim terminal residents that have not been touched during the idle retention window. */
 export async function reclaimIdleResidents(context: LifecycleContext): Promise<readonly string[]> {
-  const cutoff = context.now() - RESIDENT_IDLE_TIMEOUT_MS
+  const cutoff = context.now() - context.config.resident_idle_timeout_ms
   const candidates = context.store.list().records.filter(
     (record) =>
       record.residency_state === "resident" &&
@@ -116,7 +109,7 @@ export function startIdleResidentReclaimer(
         log("senpi-task idle resident sweep failed", { error: String(error) })
       })
       .finally(() => { running = false })
-  }, RESIDENT_IDLE_SWEEP_INTERVAL_MS)
+  }, context.config.resident_idle_timeout_ms)
   timer.unref?.()
   return () => context.idleReclaimerScheduler.clearInterval(timer)
 }

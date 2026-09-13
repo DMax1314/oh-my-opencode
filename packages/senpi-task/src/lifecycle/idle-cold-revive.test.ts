@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { coldReviveHarness } from "./__fixtures__/cold-revive-harness"
+import { realColdRevive } from "./__fixtures__/real-cold-revive"
+import { idleReplacementCycles } from "./__fixtures__/idle-replacement-cycles"
 import { parseTaskRecord } from "../store/record-parse"
 import { mapSendOutcome } from "../tools/control/send-results"
 import { join } from "node:path"
@@ -15,6 +17,15 @@ import { FakeRegistry } from "./__fixtures__/lifecycle-fakes"
 afterEach(cleanupProjects)
 
 describe("idle cold revival", () => {
+  test("#given four concurrent children #when replacements cycle four times across idle parking #then ordinary idle children remain continuable", async () => {
+    expect(await idleReplacementCycles()).toMatchObject({ cycles: 4, concurrentTurns: 4, peakResidents: 4, evicted: 0, nonContinuable: 0 })
+  })
+
+  test("#given configured idle retention #when an acknowledged send refreshes updated_at #then the old boundary cannot park it", async () => {
+    const result = await realColdRevive("in-process", false, { idleTimeoutMs: 37 })
+    expect(result).toMatchObject({ cadenceMs: 37, earlyParkAfterSend: false, parked: "persisted_only", messageCount: 1 })
+  }, 20000)
+
   for (const policy of ["recorded_warn", "recorded_silent", "refuse"] as const) {
     for (const generation of [undefined, 1, 2]) {
       test(`#given ${policy} and generation ${generation} #when cold revived #then unknown is not mismatch and policy is enforced`, async () => {

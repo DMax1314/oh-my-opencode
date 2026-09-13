@@ -1,4 +1,8 @@
-import { describe, expect, it } from "bun:test"
+import { afterEach, describe, expect, it } from "bun:test"
+import { coldReviveHarness } from "../../../../senpi-task/src/lifecycle/__fixtures__/cold-revive-harness"
+import { cleanupProjects } from "../../../../senpi-task/src/manager/__fixtures__/manager-fakes"
+
+afterEach(cleanupProjects)
 
 import type { ManagedChildHandle } from "@oh-my-opencode/senpi-task"
 
@@ -47,6 +51,18 @@ function registryFor(handle: ManagedChildHandle, pendingSteering: readonly unkno
 }
 
 describe("createManagerResidencyRegistry rpc teardown bridge", () => {
+  it("#given durable steering with no live handle #when the real manager registry checks #then pending work survives and blocks teardown", async () => {
+    const h = coldReviveHarness()
+    const pending = [{ id: "p1", message: "PENDING", deliver_as: "steer" as const }]
+    h.store.mutate(h.record.task_id, (record) => ({ ...record, pending_steering: pending }))
+    try {
+      expect(h.registry.get(h.record.task_id)).toBeUndefined()
+      expect(h.registry.hasPendingSends(h.record.task_id)).toBe(true)
+      expect(await h.lifecycle.reclaimIdleResidents?.()).toEqual([])
+      expect(h.store.load(h.record.task_id)?.pending_steering).toEqual(pending)
+    } finally { await h.dispose() }
+  })
+
   it("#given a resident with a queued steering message #when pending sends are checked #then the registry reports true", () => {
     const resident = registryFor(rpcHandle({ abort: 0, terminate: 0 }, true), [{ message: "queued" }])
     expect(resident.hasPendingSends("st_rpc")).toBe(true)

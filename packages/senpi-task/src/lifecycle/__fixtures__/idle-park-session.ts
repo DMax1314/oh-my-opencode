@@ -4,7 +4,6 @@ import { EventEmitter, once } from "node:events"
 import { loadSenpiBarrel } from "../../lazy/senpi-barrel"
 import { InProcessRunner } from "../../runners/in-process"
 import { createTaskLifecycle } from "../create"
-import { RESIDENT_IDLE_TIMEOUT_MS } from "../residency"
 import { runTaskOutput } from "../../tools/output/output"
 import { FakeRegistry, seedRecord, settings, tempStore } from "./lifecycle-fakes"
 
@@ -54,7 +53,7 @@ export async function parkRealSession() {
   })
   try {
     // Subscribe to the persisted suspension event before advancing the injected idle scheduler.
-    now += RESIDENT_IDLE_TIMEOUT_MS
+    now += settings().resident_idle_timeout_ms
     tick()
     await settled
     const output = await runTaskOutput({ manager: { get: (taskId) => store.load(taskId) ?? undefined, list: () => store.list().records.map((record) => ({ record })) }, stateDir: store.stateDir }, { task_id: id, mode: "full" }, "parent-1")

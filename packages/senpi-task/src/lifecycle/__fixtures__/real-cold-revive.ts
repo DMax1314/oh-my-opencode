@@ -15,14 +15,17 @@ import { buildSubagentPrompt } from "../../runners/in-process/subagent-prompt"
 import { RpcProcessRunner } from "../../runners/rpc-process"
 import { OmoTaskSettingsSchema } from "@oh-my-opencode/omo-config-core"
 import { createTaskLifecycle } from "../create"
-import { RESIDENT_IDLE_TIMEOUT_MS } from "../residency"
+import { EventEmitter, once } from "node:events"
+import { coldReviveTeam } from "./cold-revive-team"
+import { runTaskOutput } from "../../tools/output/output"
+import { livenessDetails } from "../../../../omo-senpi/src/components/task/member-liveness"
 import { createManagerResidencyRegistry } from "../../../../omo-senpi/src/components/task/residency-registry"
 import { runTaskSend } from "../../tools/control/send"
 
 const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }
 const modelDefinition = { id: "fixture", name: "fixture", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 } as const
 
-export async function realColdRevive(mode: "in-process" | "process", misleading = false) {
+export async function realColdRevive(mode: "in-process" | "process", misleading = false, options: { readonly idleTimeoutMs?: number; readonly team?: boolean } = {}) {
   const { ModelRegistry, ModelRuntime, SessionManager, createAgentSession } = await loadSenpiBarrel()
   const root = mkdtempSync(join(tmpdir(), "omp-item9-real-"))
   const agentDir = join(root, "agent")
@@ -44,7 +47,18 @@ export async function realColdRevive(mode: "in-process" | "process", misleading 
   registry.registerProvider("omp-fixture", provider)
   const model = registry.find("omp-fixture", "fixture")
   assert(model)
-  const store = createTaskRecordStore({ project_dir: root })
+  const events = new EventEmitter()
+  const transitions: string[] = []
+  const backing = createTaskRecordStore({ project_dir: root })
+  const store = { ...backing, transition: (id: string, event: Parameters<typeof backing.transition>[1]) => {
+    transitions.push(event.type)
+    return backing.transition(id, event)
+  }, appendEvent: (id: string, event: Parameters<typeof backing.appendEvent>[1]) => {
+    const path = backing.appendEvent(id, event)
+    events.emit(event.type)
+    return path
+  } }
+  const config = OmoTaskSettingsSchema.parse({ default_concurrency: 1, global_concurrency: 1, ...(options.idleTimeoutMs === undefined ? {} : { resident_idle_timeout_ms: options.idleTimeoutMs }) })
   const record = createTaskRecord({ parent_session_id: "fixture-parent", root_session_id: "fixture-parent", depth: 1, execution_mode: mode, model: "omp-fixture/fixture", notify_on_terminal: false })
   const sessionDir = join(store.stateDir, "children", record.task_id, "sessions", record.task_id)
   const sessionManager = SessionManager.create(root, sessionDir)
@@ -65,33 +79,62 @@ export async function realColdRevive(mode: "in-process" | "process", misleading 
   }), () => ({ agentDir, modelRuntime: runtime, modelRegistry: registry, model }))
   const extension = join(root, "provider.ts")
   writeFileSync(extension, `export default function(pi) { pi.registerProvider("omp-fixture", ${JSON.stringify(provider)}); }`)
-  const rpc = new RpcProcessRunner({ modelAdmission: async () => undefined, buildSpawn: (input) => ({ command: process.execPath, args: [fileURLToPath(import.meta.resolve("@code-yeongyu/senpi/rpc-entry")), "--no-extensions", "--no-skills", "--extension", extension, "--model", "omp-fixture/fixture"], cwd: input.cwd, env: { PATH: process.env.PATH, HOME: root, SENPI_CODING_AGENT_DIR: agentDir, SENPI_CODING_AGENT_SESSION_DIR: sessionDir, OMO_SENPI_TASK_RPC_CHILD: "1" } }) })
+  const trustedRespawnLaunch = options.team ? await coldReviveTeam(store, config, record.task_id) : undefined
+  const rpc = new RpcProcessRunner({ modelAdmission: async () => undefined, buildSpawn: (input) => ({ command: process.execPath, args: [fileURLToPath(import.meta.resolve("@code-yeongyu/senpi/rpc-entry")), "--no-extensions", "--no-skills", "--extension", extension, ...(input.extensions ?? []).flatMap((path) => ["--extension", path]), "--model", "omp-fixture/fixture"], cwd: input.cwd, env: { PATH: process.env.PATH, HOME: root, SENPI_CODING_AGENT_DIR: agentDir, SENPI_CODING_AGENT_SESSION_DIR: sessionDir, OMO_SENPI_TASK_RPC_CHILD: "1", ...input.memberEnv } }) })
   let now = 1000
-  const config = OmoTaskSettingsSchema.parse({ default_concurrency: 1, global_concurrency: 1 })
+  let cadenceMs = 0
+  let unrefs = 0
+  let tick: () => void = () => assert.fail("scheduler not registered")
   const manager = createTaskManager({ store, config, cwd: root, now: () => now, runners: { "in-process": runner, process: runner }, rpcRespawnRunner: rpc,
+    ...(trustedRespawnLaunch === undefined ? {} : { trustedRespawnLaunch }),
     planner: () => { throw new Error("cold revival must not replan") },
     destruction: { destroyResidentTask: (id, cause) => lifecycle.destroyResidentTask(id, cause) },
   })
-  const lifecycle = createTaskLifecycle({ store, config, registry: createManagerResidencyRegistry(() => manager), now: () => now, idleReclaimerScheduler: { setInterval: () => ({}), clearInterval: () => undefined } })
+  const lifecycle = createTaskLifecycle({ store, config, registry: createManagerResidencyRegistry(() => manager), now: () => now,
+    idleReclaimerScheduler: { setInterval: (callback, ms) => { tick = callback; cadenceMs = ms; return { unref: () => { unrefs += 1 } } }, clearInterval: () => undefined },
+  })
   try {
     const managedSpec = { taskId: record.task_id, cwd: root, stateDir: join(store.stateDir, "children", record.task_id), prompt: spec.prompt, instructions: spec.instructions, depth: 1, parentSessionId: "fixture-parent", rootSessionId: "fixture-parent", agentType: "fixture-worker", toolAllowlist: ["read", "fixture_read"], toolDenylist: ["write", "edit"], memberScopedToolNames: ["fixture_read"] }
-    const initial = mode === "in-process" ? await runner.resume?.(managedSpec, sessionPath) : adaptRpcHandle(await rpc.start({ task_id: record.task_id, cwd: root, state_dir: managedSpec.stateDir, prompt: "", resumeSessionPath: sessionPath, model: "omp-fixture/fixture" }))
+    const member = store.load(record.task_id)
+    assert(member)
+    const trusted = await trustedRespawnLaunch?.(member)
+    const initial = mode === "in-process" ? await runner.resume?.(managedSpec, sessionPath) : adaptRpcHandle(await rpc.start({ task_id: record.task_id, cwd: root, state_dir: managedSpec.stateDir, prompt: "", resumeSessionPath: sessionPath, model: "omp-fixture/fixture", ...trusted }))
     assert(initial)
     const current = store.load(record.task_id)
     assert(current)
     assert.equal((await manager.reattach(current, initial)).ok, true)
     const before = readFileSync(sessionPath, "utf8")
-    now += RESIDENT_IDLE_TIMEOUT_MS
-    assert.deepEqual(await lifecycle.reclaimIdleResidents?.(), [record.task_id])
+    assert.equal(cadenceMs, config.resident_idle_timeout_ms)
+    assert.equal(unrefs, 1)
+    now += config.resident_idle_timeout_ms - 1
+    assert.deepEqual(await lifecycle.reclaimIdleResidents?.(), [])
+    const suspended = once(events, "suspended", { signal: AbortSignal.timeout(15000) })
+    now += 1
+    const parkedAt = now
+    tick()
+    await suspended
     assert.equal(manager.getResidentHandle(record.task_id), undefined)
-    assert.equal(store.load(record.task_id)?.residency_state, mode === "in-process" ? "persisted_only" : "rpc_detached")
+    const parkedRecord = store.load(record.task_id)
+    assert(parkedRecord)
+    const parked = parkedRecord.residency_state
+    assert.equal(parked, mode === "in-process" ? "persisted_only" : "rpc_detached")
+    assert(transitions.includes(mode === "in-process" ? "persist_only" : "detach_rpc"))
+    assert.equal(livenessDetails(parkedRecord), undefined)
+    const output = await runTaskOutput({ manager, stateDir: store.stateDir }, { task_id: record.task_id, mode: "full" }, "fixture-parent")
+    assert.equal(output.details.kind, "transcript")
+    if (output.details.kind === "transcript") assert(output.details.transcript.includes("TRANSCRIPT_SENTINEL"))
+    now += 7
     const result = await runTaskSend(manager, { to: record.task_id, message: "CONTINUE_SENTINEL" }, "fixture-parent")
     assert.equal(result.details.kind, "revived")
     const terminal = manager.waitFor(record.task_id, { signal: AbortSignal.timeout(15000) })
-    const request = await requestStarted.promise
+    const request = await Promise.race([requestStarted.promise, terminal.then(() => assert.fail("terminal before provider request"))])
     assert(request.includes("TRANSCRIPT_SENTINEL"))
     assert(request.includes("CONTINUE_SENTINEL"))
     assert(!request.includes("DO_NOT_REPLAY_SENTINEL"))
+    const messageCount = request.split("CONTINUE_SENTINEL").length - 1
+    assert.equal(messageCount, 1)
+    const memberExtensionRestored = options.team === true && request.includes('"name":"task_send"')
+    if (options.team) assert(memberExtensionRestored)
     releaseResponse.resolve()
     const completed = await terminal
     assert.equal(completed.status, misleading ? "error" : "completed")
@@ -105,11 +148,20 @@ export async function realColdRevive(mode: "in-process" | "process", misleading 
       assert(!toolSurfaces[1]?.includes("write"))
       assert(request.includes("INSTRUCTIONS_SENTINEL"))
     }
+    now = parkedAt + config.resident_idle_timeout_ms
+    assert.deepEqual(await lifecycle.reclaimIdleResidents?.(), [])
+    const earlyParkAfterSend = store.load(record.task_id)?.residency_state !== "resident"
+    assert.equal(earlyParkAfterSend, false)
+    const pending = [{ id: "pending-ttl", message: "PENDING_SENTINEL", deliver_as: "steer" as const }]
+    store.mutate(record.task_id, (fresh) => ({ ...fresh, pending_steering: pending }))
+    now += 7
+    assert.deepEqual(await lifecycle.reclaimIdleResidents?.(), [])
+    assert.deepEqual(store.load(record.task_id)?.pending_steering, pending)
     // A further revive can acquire at cap=1, proving the previous terminal released its lease.
     const leaseProbe = await runTaskSend(manager, { to: record.task_id, message: "LEASE_PROBE" }, "fixture-parent")
     assert.equal(leaseProbe.details.kind, "revived")
     await manager.waitFor(record.task_id, { signal: AbortSignal.timeout(15000) })
-    return { mode, source: "real-manager/task_send/AgentSession", result: result.details, status: completed.status, run_epoch: completed.notification.run_epoch, restoredTools: toolSurfaces, transcriptPreserved: readFileSync(sessionPath, "utf8").includes("TRANSCRIPT_SENTINEL"), transcriptBeforeBytes: before.length, leaseReleased: leaseProbe.details.kind === "revived", providerCalls: calls, isolatedAgentDir: agentDir }
+    return { cadenceMs, unrefs, transitions, parked, earlyParkAfterSend, memberExtensionRestored, messageCount, pendingSteeringPreserved: true, outputReadable: true, mode, source: "real-manager/task_send/AgentSession", result: result.details, status: completed.status, run_epoch: completed.notification.run_epoch, restoredTools: toolSurfaces, transcriptPreserved: readFileSync(sessionPath, "utf8").includes("TRANSCRIPT_SENTINEL"), transcriptBeforeBytes: before.length, leaseReleased: leaseProbe.details.kind === "revived", providerCalls: calls, isolatedAgentDir: agentDir }
   } finally {
     releaseResponse.resolve()
     await lifecycle.destroyResidentTask(record.task_id, "cancel")

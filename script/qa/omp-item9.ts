@@ -5,6 +5,8 @@ import { execFileSync } from "node:child_process"
 import { realColdRevive } from "../../packages/senpi-task/src/lifecycle/__fixtures__/real-cold-revive"
 import { coldReviveHarness } from "../../packages/senpi-task/src/lifecycle/__fixtures__/cold-revive-harness"
 import { cleanupProjects } from "../../packages/senpi-task/src/manager/__fixtures__/manager-fakes"
+import { idleReplacementCycles } from "../../packages/senpi-task/src/lifecycle/__fixtures__/idle-replacement-cycles"
+import { OmoTaskSettingsSchema, OmoTaskSettingsLayerSchema } from "@oh-my-opencode/omo-config-core"
 
 const args = process.argv.slice(2)
 const scenario = args[args.indexOf("--case") + 1]
@@ -14,14 +16,46 @@ const startedAt = new Date().toISOString()
 const sha = process.env.OMP_SOURCE_SHA ?? execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim()
 mkdirSync(dirname(out), { recursive: true })
 try {
-  const results = scenario === "park-send-resume"
-    ? [await realColdRevive("in-process"), await realColdRevive("process")]
-    : scenario === "revive-refusals" ? await refusals() : assert.fail("unknown --case")
+  const results = await runScenario()
   writeFileSync(out, JSON.stringify({ case: scenario, sha, startedAt, endedAt: new Date().toISOString(), passed: true, results, cleanup: "execution-owned fixtures removed" }, null, 2))
 } catch (error) {
   writeFileSync(out, JSON.stringify({ case: scenario, sha, startedAt, endedAt: new Date().toISOString(), passed: false, error: error instanceof Error ? error.stack : String(error) }, null, 2))
   throw error
 } finally { cleanupProjects() }
+
+async function runScenario() {
+  switch (scenario) {
+    case "park-send-resume": return [await realColdRevive("in-process"), await realColdRevive("process")]
+    case "revive-refusals": return refusals()
+    case "configured-ttl-team": return [await realColdRevive("in-process", false, { idleTimeoutMs: 37 }), await realColdRevive("process", false, { idleTimeoutMs: 37, team: true }), await idleReplacementCycles()]
+    case "pending-steering-pressure": return [await pendingPressure(), ...await refusals()]
+    default: return assert.fail("unknown --case")
+  }
+}
+
+async function pendingPressure() {
+  const invalids = [0, -1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, "37", "unlimited", null]
+  for (const value of invalids) {
+    assert.equal(OmoTaskSettingsSchema.safeParse({ resident_idle_timeout_ms: value }).success, false)
+    assert.equal(OmoTaskSettingsLayerSchema.safeParse({ resident_idle_timeout_ms: value }).success, false)
+  }
+  let now = 1000
+  const h = coldReviveHarness({ idleTimeoutMs: 37, now: () => now })
+  try {
+    assert.equal((await h.send()).kind, "revived")
+    const terminal = h.manager.waitFor(h.record.task_id, { signal: AbortSignal.timeout(5000) })
+    h.fake.settle({ status: "completed", finalResponse: "DONE" })
+    await terminal
+    const pending = [{ id: "p1", message: "PENDING", deliver_as: "steer" as const }]
+    h.store.mutate(h.record.task_id, (record) => ({ ...record, pending_steering: pending }))
+    now += 37
+    assert.equal(h.registry.hasPendingSends(h.record.task_id), true)
+    assert.deepEqual(await h.lifecycle.reclaimIdleResidents?.(), [])
+    assert.deepEqual(h.store.load(h.record.task_id)?.pending_steering, pending)
+    assert(h.manager.getResidentHandle(h.record.task_id))
+    return { invalidDurationsRejected: invalids.length, pendingSteeringPreserved: true, residentRetained: true }
+  } finally { await h.dispose() }
+}
 
 async function refusals() {
   const results: unknown[] = []

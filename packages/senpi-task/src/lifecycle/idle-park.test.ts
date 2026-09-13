@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { writeFileSync } from "node:fs"
 import { EventEmitter, once } from "node:events"
 import { resolveContext } from "./context"
-import { reclaimIdleResidents, RESIDENT_IDLE_TIMEOUT_MS } from "./residency"
+import { reclaimIdleResidents, startIdleResidentReclaimer } from "./residency"
 import { cleanupProjects, fakeHandle, FakeRegistry, readEvents, seedRecord, settings, tempStore } from "./__fixtures__/lifecycle-fakes"
 import { runTaskOutput } from "../tools/output/output"
 import { configureSharedSubunitLogger } from "@oh-my-opencode/utils"
@@ -11,7 +11,7 @@ import { FakeRunner } from "../manager/__fixtures__/manager-fakes"
 import { parkRealSession } from "./__fixtures__/idle-park-session"
 
 const NOW = 2_000_000
-const OLD = new Date(NOW - RESIDENT_IDLE_TIMEOUT_MS).toISOString()
+const OLD = new Date(NOW - settings().resident_idle_timeout_ms).toISOString()
 afterEach(() => { configureSharedSubunitLogger(undefined); cleanupProjects() })
 
 function evidence(name: string, data: unknown): void {
@@ -20,6 +20,35 @@ function evidence(name: string, data: unknown): void {
 }
 
 describe("idle suspension", () => {
+  test("#given configured retention #when the exact updated_at boundary arrives #then no early park and one boundary park", async () => {
+    const store = tempStore()
+    const registry = new FakeRegistry()
+    const id = "st_00000711"
+    const config = { ...settings(), resident_idle_timeout_ms: 37 }
+    seedRecord(store, { task_id: id, host_pid: process.pid, updated_at: new Date(1000).toISOString() })
+    registry.add(fakeHandle(id, "rpc", []))
+    let now = 1036
+    const context = resolveContext({ store, registry, config, now: () => now })
+    expect(await reclaimIdleResidents(context)).toEqual([])
+    now = 1037
+    expect(await reclaimIdleResidents(context)).toEqual([id])
+    expect(store.load(id)?.residency_state).toBe("rpc_detached")
+  })
+
+  test("#given configured retention #when the reaper scheduler starts #then cadence equals TTL and remains unrefed", () => {
+    const intervals: number[] = []
+    let unrefs = 0
+    let clears = 0
+    const config = { ...settings(), resident_idle_timeout_ms: 37 }
+    const stop = startIdleResidentReclaimer(resolveContext({ store: tempStore(), registry: new FakeRegistry(), config,
+      idleReclaimerScheduler: { setInterval: (_tick, ms) => { intervals.push(ms); return { unref: () => { unrefs += 1 } } }, clearInterval: () => { clears += 1 } },
+    }))
+    stop()
+    expect(intervals).toEqual([37])
+    expect(unrefs).toBe(1)
+    expect(clears).toBe(1)
+  })
+
   test("#given a real restored session #when the injected scheduler parks it #then task_output retains the transcript", async () => {
     // given / when
     const result = await parkRealSession()
