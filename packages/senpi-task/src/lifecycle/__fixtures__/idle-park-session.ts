@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { EventEmitter, once } from "node:events"
-import { ModelRuntime, SessionManager, createAgentSession } from "@code-yeongyu/senpi"
+import { loadSenpiBarrel } from "../../lazy/senpi-barrel"
 import { InProcessRunner } from "../../runners/in-process"
 import { createTaskLifecycle } from "../create"
 import { RESIDENT_IDLE_TIMEOUT_MS } from "../residency"
@@ -10,6 +10,7 @@ import { FakeRegistry, seedRecord, settings, tempStore } from "./lifecycle-fakes
 
 /** Restores a deterministic real AgentSession; never sends a prompt or calls a provider. */
 export async function parkRealSession() {
+  const { ModelRuntime, SessionManager, createAgentSession } = await loadSenpiBarrel()
   const store = tempStore()
   const id = "st_00000701"
   const agentDir = join(store.stateDir, "isolated-agent")

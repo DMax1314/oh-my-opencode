@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { ModelRegistry, ModelRuntime, SessionManager, createAgentSession } from "@code-yeongyu/senpi"
+import { loadSenpiBarrel } from "../../lazy/senpi-barrel"
 import { Type } from "typebox"
 import { createTaskRecord } from "../../state"
 import { createTaskRecordStore } from "../../store"
@@ -23,6 +23,7 @@ const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2
 const modelDefinition = { id: "fixture", name: "fixture", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 } as const
 
 export async function realColdRevive(mode: "in-process" | "process", misleading = false) {
+  const { ModelRegistry, ModelRuntime, SessionManager, createAgentSession } = await loadSenpiBarrel()
   const root = mkdtempSync(join(tmpdir(), "omp-item9-real-"))
   const agentDir = join(root, "agent")
   mkdirSync(agentDir)
