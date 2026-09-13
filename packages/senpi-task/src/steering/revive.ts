@@ -81,13 +81,14 @@ async function deliverRevivedTerminal(
     return { kind: "capacity_deferred", task_id: record.task_id, reason: "Task capacity is full; retry explicitly." }
   }
   let revived: TaskRecord | undefined
+  let deliveryAcknowledged = false
   try {
     const fresh = port.store.load(record.task_id)
     if (fresh === null || fresh.status !== record.status || fresh.killed === true || fresh.host_pid !== record.host_pid || fresh.notification.run_epoch !== record.notification.run_epoch) {
       reservation.release()
       return lazyRevivalFailure(record, "task ownership or status changed before delivery")
     }
-    revived = buildRevived(fresh, nowIso())
+    revived = buildDeliveryRecord(fresh, nowIso(), message)
     if (rollbackOnFailure) {
       // Mutate the claimed generation atomically. replace() is a spawn-time stamping surface in
       // the adapter and would migrate a legacy unknown config generation to today's value.
@@ -95,7 +96,7 @@ async function deliverRevivedTerminal(
       const updated = port.store.mutate(record.task_id, (current) => {
         if (current.status !== fresh.status || current.host_pid !== fresh.host_pid || current.residency_state !== "resident" || current.killed === true || current.notification.run_epoch !== fresh.notification.run_epoch) return current
         applied = true
-        return buildRevived(current, nowIso())
+        return buildDeliveryRecord(current, nowIso(), message)
       })
       if (!applied || updated === null) {
         reservation.release()
@@ -106,6 +107,7 @@ async function deliverRevivedTerminal(
     port.store.appendEvent(record.task_id, { type: "revived", payload: { run_epoch: revived.notification.run_epoch } })
     const pending = revived.pending_steering ?? []
     await handle.followUp([...pending.map((entry) => entry.message), message].join("\n\n"))
+    deliveryAcknowledged = true
     const acknowledged = port.store.load(record.task_id)
     if (acknowledged?.status !== "running" || acknowledged.host_pid !== revived.host_pid || acknowledged.notification.run_epoch !== revived.notification.run_epoch || port.liveHandle(record.task_id) !== handle) {
       reservation.release()
@@ -113,11 +115,21 @@ async function deliverRevivedTerminal(
     }
     if (pending.length > 0) {
       const deliveredIds = new Set(pending.map((entry) => entry.id))
-      port.store.mutate(record.task_id, (current) => ({ ...current, pending_steering: (current.pending_steering ?? []).filter((entry) => !deliveredIds.has(entry.id)) }))
+      port.store.mutate(record.task_id, (current) => {
+        const { revive_delivery_uncertain: _uncertainty, ...rest } = current
+        return { ...rest, pending_steering: (current.pending_steering ?? []).filter((entry) => !deliveredIds.has(entry.id)) }
+      })
     }
     reservation.commit()
     return { kind: "revived", task_id: record.task_id, run_epoch: revived.notification.run_epoch }
   } catch (error) {
+    if (deliveryAcknowledged && revived?.revive_delivery_uncertain !== undefined) {
+      // The batch was accepted. Its pre-dispatch marker survives failed ack bookkeeping, so
+      // neither rollback nor a later cold send can replay the still-persisted queue.
+      log("senpi-task pending delivery acknowledgment persistence failed", { taskId: record.task_id, error: error instanceof Error ? error.message : String(error) })
+      reservation.commit()
+      return deliveryUncertain(record, revived.notification.run_epoch)
+    }
     // A live child rejected the RPC before consuming the prompt, so teardown + rollback makes an
     // explicit retry safe. An exited child may have accepted it before the response was lost; keep
     // the revived epoch intact and let outcome tracking terminalize it instead of sending twice.
@@ -161,6 +173,14 @@ async function deliverRevivedTerminal(
     if (rollbackOnFailure && priorRecord !== undefined) await bestEffortRollback(port, priorRecord)
     reservation.release()
     return lazyRevivalFailure(record, error instanceof Error ? error.message : String(error))
+  }
+}
+
+function buildDeliveryRecord(record: TaskRecord, timestamp: string, message: string): TaskRecord {
+  const revived = buildRevived(record, timestamp)
+  return (record.pending_steering?.length ?? 0) === 0 ? revived : {
+    ...revived,
+    revive_delivery_uncertain: { run_epoch: revived.notification.run_epoch, message_sha256: messageSha256(message) },
   }
 }
 

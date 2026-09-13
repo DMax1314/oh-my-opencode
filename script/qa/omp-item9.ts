@@ -82,6 +82,24 @@ async function refusals() {
     assert.equal(attempts, 1)
     results.push({ initial, repeated, attempts })
   } finally { await uncertain.dispose() }
+  let acknowledged = false
+  const ackFailure = coldReviveHarness({
+    resume: async (_spec, _path, handle) => ({ ...handle, followUp: async (message) => { await handle.followUp(message); acknowledged = true } }),
+    storeWrapper: (store) => ({ ...store, mutate: (id, update) => store.mutate(id, (record) => {
+      const next = update(record)
+      if (acknowledged && next.pending_steering?.length === 0) throw new Error("fixture ack persistence failure")
+      return next
+    }) }),
+  })
+  try {
+    ackFailure.store.mutate(ackFailure.record.task_id, (record) => ({ ...record, pending_steering: [{ id: "p1", message: "PENDING", deliver_as: "steer" }] }))
+    const initial = await ackFailure.send()
+    const repeated = await ackFailure.send()
+    assert.equal(initial.kind, "delivery_uncertain")
+    assert.equal(repeated.kind, "delivery_uncertain")
+    assert.equal(ackFailure.fake.followUpCalls.length, 1)
+    results.push({ case: "acknowledged batch with failed bookkeeping", initial, repeated, attempts: ackFailure.fake.followUpCalls.length })
+  } finally { acknowledged = false; await ackFailure.dispose() }
   results.push(await realColdRevive("in-process", true))
   return results
 }

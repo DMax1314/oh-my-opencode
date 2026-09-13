@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createTaskRecord, type TaskRecord } from "../../state"
-import { createTaskRecordStore } from "../../store"
+import { createTaskRecordStore, type TaskRecordStore } from "../../store"
 import { createTaskManager } from "../../manager/manager"
 import { FakeRunner, makeHandle, settings, tempProject } from "../../manager/__fixtures__/manager-fakes"
 import type { ManagedChildHandle } from "../../manager/child-handle"
@@ -15,6 +15,7 @@ export function coldReviveHarness(options: {
   readonly policy?: ReviveDriftPolicy
   readonly generation?: number
   readonly cap?: number
+  readonly storeWrapper?: (store: TaskRecordStore) => TaskRecordStore
   readonly resume?: (spec: ManagedStartSpec, path: string, handle: ManagedChildHandle) => Promise<ManagedChildHandle>
 } = {}) {
   const project = tempProject()
@@ -27,7 +28,8 @@ export function coldReviveHarness(options: {
     ...(options.generation === undefined ? {} : { config_generation: options.generation }),
   }
   backing.save(record)
-  const store = createConfigGenerationStampingStore(backing, () => 2)
+  const stamped = createConfigGenerationStampingStore(backing, () => 2)
+  const store = options.storeWrapper?.(stamped) ?? stamped
   const sessionDir = join(store.stateDir, "children", record.task_id, "sessions", record.task_id)
   mkdirSync(sessionDir, { recursive: true })
   const sessionPath = join(sessionDir, "fixture.jsonl")

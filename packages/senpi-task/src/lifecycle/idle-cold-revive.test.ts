@@ -135,6 +135,25 @@ describe("idle cold revival", () => {
     } finally { await h.dispose() }
   })
 
+  test("#given an acknowledged pending batch #when queue bookkeeping fails #then durable uncertainty prevents replay", async () => {
+    let delivered = false
+    const h = coldReviveHarness({
+      resume: async (_spec, _path, handle) => ({ ...handle, followUp: async (message) => { await handle.followUp(message); delivered = true } }),
+      storeWrapper: (store) => ({ ...store, mutate: (id, update) => store.mutate(id, (fresh) => {
+        const next = update(fresh)
+        if (delivered && next.pending_steering?.length === 0) throw new Error("queue ack persistence failed")
+        return next
+      }) }),
+    })
+    h.store.mutate(h.record.task_id, (record) => ({ ...record, pending_steering: [{ id: "p1", message: "PENDING", deliver_as: "steer" }] }))
+    try {
+      expect((await h.send()).kind).toBe("delivery_uncertain")
+      expect(h.store.load(h.record.task_id)?.revive_delivery_uncertain?.run_epoch).toBe(1)
+      expect((await h.send()).kind).toBe("delivery_uncertain")
+      expect(h.fake.followUpCalls).toEqual(["PENDING\n\nCONTINUE_SENTINEL"])
+    } finally { delivered = false; await h.dispose() }
+  })
+
   test("#given pending messages #when delivery acknowledges #then the batch is delivered and its entries clear", async () => {
     const h = coldReviveHarness()
     h.store.mutate(h.record.task_id, (record) => ({ ...record, pending_steering: [{ id: "p1", message: "PENDING", deliver_as: "steer" }] }))
